@@ -1,6 +1,12 @@
+import os
+
 import numpy as np
 import polars as pl
 from sklearn.decomposition import PCA
+
+#channels and run ranges come from common.py, so PCA 
+# and the ridge detector share the same choices
+from common import CHANNELS, TRAIN_RUNS, VAL_RUNS, TEST_RUNS, split
 
 df_ff = pl.read_parquet("data/tep_fault_free_training.parquet")
 df_faulty = pl.read_parquet("data/tep_faulty_training_runs01-20.parquet")
@@ -11,14 +17,10 @@ df_ff = df_ff.with_columns(
 )
 
 # 52 channel names list
-channels = [f"xmeas_{i}" for i in range(1, 42)]+[
-    f"xmv_{i}" for i in range(1, 12)
-]
+channels = CHANNELS
 
 # filter first 300 training runs
-train_df = df_ff.filter(
-    (pl.col("simulationRun") >= 1) & (pl.col("simulationRun") <= 300)
-)
+train_df = split(df_ff, TRAIN_RUNS)
 
 x_train = train_df.select(channels).to_numpy()
 mean = x_train.mean(axis=0)
@@ -39,18 +41,26 @@ P = pca.components_[:k].T
 lambdas = pca.explained_variance_[:k]
 
 # scoring data filering
-val_df = df_ff.filter(
-    (pl.col("simulationRun") >= 301) & (pl.col("simulationRun") <= 400)
-)
-test_df = df_ff.filter(
-    (pl.col("simulationRun") >= 401) & (pl.col("simulationRun") <= 500)
-)
+val_df = df_ff.filter(df_ff, VAL_RUNS)
+test_df = df_ff.filter(df_ff, TEST_RUNS)
 faulty_df = df_faulty.filter(
     (pl.col("faultNumber") >= 1)
     & (pl.col("faultNumber") <= 20)
     & (pl.col("simulationRun") >= 1)
     & (pl.col("simulationRun") <= 20)
 )
+
+#sanity check that compares our scores 
+# with sklearn's transform/inverse_transform on the first 5000 validation rows
+
+z_chk = (val_df.select(channels).to_numpy()[:5000] - mean)/std
+pca_k = PCA(n_components=k).fit(z_train)
+t_ref = pca_k.transform(z_chk)
+T2_ref = np.sum(t_ref**2 / pca_k.explained_variance_, axis=1)
+SPE_ref = np.sum((z_chk - pca_k.inverse_transform(t_ref)) ** 2, axis=1)
+t_chk = z_chk @ P
+assert np.allclose(np.sum(t_chk**2 / lambdas, axis=1), T2_ref)
+assert np.allclose(np.sum((z_chk - t_chk @ P.T) ** 2, axis=1), SPE_ref)
 
 all_dfs = [val_df, test_df, faulty_df]
 results = []
@@ -75,6 +85,10 @@ for df in all_dfs:
     results.append(res)
 
 # save parquet file
+os.makedirs("results", exist_ok=True)
 final_df = pl.concat(results)
 final_df.write_parquet("results/scores_pca.parquet")
 print("saved results/scores_pca.parquet")
+
+with open("results/pca_k.txt", "w") as f:
+    f.write(f"{k}\n")
