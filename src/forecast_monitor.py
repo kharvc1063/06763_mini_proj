@@ -1,13 +1,18 @@
 ﻿from pathlib import Path
 
+import sys
+
 import numpy as np
 import polars as pl
 from sklearn.linear_model import Ridge
 
-# 52 channel names list
-channels = [f"xmeas_{i}" for i in range(1, 42)] + [
-    f"xmv_{i}" for i in range(1, 12)
-]
+# Allow this script to import common.py from the project root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common import CHANNELS, KEYS, RUN, RESULTS
+from common import TRAIN_RUNS, VAL_RUNS, TEST_RUNS
+from common import load_fault_free, load_faulty, split, fit_scaler, standardize
+
+channels = CHANNELS
 
 
 # Build lag features separately inside each run
@@ -16,8 +21,8 @@ def make_lagged_data(df, mean, std):
     x_tables = []
     y_tables = []
 
-    df = df.sort(["faultNumber", "simulationRun", "sample"])
-    runs = df.partition_by(["faultNumber", "simulationRun"], maintain_order=True)
+    df = df.sort(KEYS)
+    runs = df.partition_by(["faultNumber", RUN], maintain_order=True)
 
     for run in runs:
         samples = run["sample"].to_numpy()
@@ -26,13 +31,12 @@ def make_lagged_data(df, mean, std):
         if len(run) < 3:
             continue
 
-        x = run.select(channels).to_numpy()
-        z = (x - mean) / std
+        z = standardize(run, mean, std)
 
         # Predict sample t using sample t-1 and sample t-2
         X = np.hstack([z[1:-1], z[:-2]])
         y = z[2:]
-        keys = run.select(["faultNumber", "simulationRun", "sample"]).slice(2)
+        keys = run.select(KEYS).slice(2)
 
         key_tables.append(keys)
         x_tables.append(X)
@@ -45,23 +49,15 @@ def make_lagged_data(df, mean, std):
 
 
 def main():
-    df_ff = pl.read_parquet("data/tep_fault_free_training.parquet")
-    df_faulty = pl.read_parquet("data/tep_faulty_training_runs01-20.parquet")
-
-    # faultNumber = 0 for normal data
-    df_ff = df_ff.with_columns(
-        pl.lit(0).cast(df_faulty["faultNumber"].dtype).alias("faultNumber")
-    )
+    # Load sorted data with faultNumber = 0 for normal runs.
+    df_ff = load_fault_free()
+    df_faulty = load_faulty()
 
     # Filter first 300 training runs
-    train_df = df_ff.filter(
-        (pl.col("simulationRun") >= 1) & (pl.col("simulationRun") <= 300)
-    )
+    train_df = split(df_ff, TRAIN_RUNS)
 
     # Standardize using all normal training rows
-    x_train = train_df.select(channels).to_numpy()
-    mean = x_train.mean(axis=0)
-    std = x_train.std(axis=0, ddof=1)
+    mean, std = fit_scaler(train_df)
 
     # Fit one ridge model with 104 inputs and 52 targets
     train_keys, X_train, y_train = make_lagged_data(train_df, mean, std)
@@ -74,18 +70,9 @@ def main():
     residual_std = residual_train.std(axis=0, ddof=1)
 
     # Filter scoring data
-    val_df = df_ff.filter(
-        (pl.col("simulationRun") >= 301) & (pl.col("simulationRun") <= 400)
-    )
-    test_df = df_ff.filter(
-        (pl.col("simulationRun") >= 401) & (pl.col("simulationRun") <= 500)
-    )
-    faulty_df = df_faulty.filter(
-        (pl.col("faultNumber") >= 1)
-        & (pl.col("faultNumber") <= 20)
-        & (pl.col("simulationRun") >= 1)
-        & (pl.col("simulationRun") <= 20)
-    )
+    val_df = split(df_ff, VAL_RUNS)
+    test_df = split(df_ff, TEST_RUNS)
+    faulty_df = df_faulty
 
     all_dfs = [val_df, test_df, faulty_df]
     results = []
@@ -102,14 +89,14 @@ def main():
         results.append(res)
 
     # Save parquet file
-    Path("results").mkdir(exist_ok=True)
+    RESULTS.mkdir(exist_ok=True)
     final_df = pl.concat(results)
-    final_df.write_parquet("results/scores_ridge.parquet")
+    final_df.write_parquet(RESULTS / "scores_ridge.parquet")
     print("saved results/scores_ridge.parquet")
 
     # Save parameters for channel contributions in the second week
     np.savez_compressed(
-        "results/ridge_model.npz",
+        RESULTS / "ridge_model.npz",
         channels=np.array(channels),
         mean=mean,
         std=std,
