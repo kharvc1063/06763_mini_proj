@@ -1,8 +1,13 @@
 import os
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 from sklearn.decomposition import PCA
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 #channels and run ranges come from common.py, so PCA 
 # and the ridge detector share the same choices
@@ -41,8 +46,8 @@ P = pca.components_[:k].T
 lambdas = pca.explained_variance_[:k]
 
 # scoring data filering
-val_df = df_ff.filter(df_ff, VAL_RUNS)
-test_df = df_ff.filter(df_ff, TEST_RUNS)
+val_df = split(df_ff, VAL_RUNS)
+test_df = split(df_ff, TEST_RUNS)
 faulty_df = df_faulty.filter(
     (pl.col("faultNumber") >= 1)
     & (pl.col("faultNumber") <= 20)
@@ -92,3 +97,14 @@ print("saved results/scores_pca.parquet")
 
 with open("results/pca_k.txt", "w") as f:
     f.write(f"{k}\n")
+
+np.savez_compressed(
+    "results/pca_model.npz",
+    channels=np.array(channels),
+    mean=mean,
+    std=std,
+    P=P,
+    lambdas=lambdas,
+    k=k,
+)
+print("saved results/pca_model.npz")
