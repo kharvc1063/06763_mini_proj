@@ -1,6 +1,9 @@
 # Downloaded datasets
 /data/
 
+#results
+/results/
+
 # Python environments and caches
 .venv/
 venv/
@@ -8,6 +11,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+
+#evidence
+miniproject-evidence.pdf
 
 # Notebook checkpoints
 .ipynb_checkpoints/
